@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -441,6 +441,44 @@ func TestConvertClaudeRequestToCodex_ToolChoiceSpecificFunctionUsesConvertedName
 	}
 	if choiceName == longName {
 		t.Fatalf("tool_choice.name should use shortened Codex tool name. Output: %s", string(result))
+	}
+}
+
+func TestConvertClaudeRequestToCodex_WebSearchSourcesInclude(t *testing.T) {
+	tests := []struct {
+		name        string
+		tools       string
+		wantSources bool
+	}{
+		{name: "no tools"},
+		{name: "empty tools", tools: `[]`},
+		{name: "ordinary function", tools: `[{"name":"lookup","input_schema":{"type":"object"}}]`},
+		{name: "same name function", tools: `[{"name":"web_search","input_schema":{"type":"object"}}]`},
+		{name: "unsupported type", tools: `[{"type":"web_search_20990101","name":"web_search"}]`},
+		{name: "20250305", tools: `[{"type":"web_search_20250305","name":"web_search"}]`, wantSources: true},
+		{name: "20260209", tools: `[{"type":"web_search_20260209","name":"web_search"}]`, wantSources: true},
+		{name: "custom name", tools: `[{"type":"web_search_20250305","name":"browser_search"}]`, wantSources: true},
+		{name: "nameless search", tools: `[{"type":"web_search_20250305"}]`, wantSources: true},
+		{name: "multiple searches and function", tools: `[{"type":"web_search_20250305","name":"search_one"},{"type":"web_search_20260209","name":"search_two"},{"name":"lookup","input_schema":{"type":"object"}}]`, wantSources: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, stream := range []bool{false, true} {
+				inputJSON := `{"model":"claude-opus-4-7","messages":[{"role":"user","content":"hello"}]`
+				if tt.tools != "" {
+					inputJSON += `,"tools":` + tt.tools
+				}
+				inputJSON += `}`
+				result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), stream)
+				wantInclude := `["reasoning.encrypted_content"]`
+				if tt.wantSources {
+					wantInclude = `["reasoning.encrypted_content","web_search_call.action.sources"]`
+				}
+				if got := gjson.GetBytes(result, "include").Raw; got != wantInclude {
+					t.Errorf("stream=%v: include = %s, want %s", stream, got, wantInclude)
+				}
+			}
+		})
 	}
 }
 

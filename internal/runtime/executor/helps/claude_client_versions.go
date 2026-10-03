@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
-// The Claude Code CLI version an operator pins in claude-header-defaults.user-agent
+// The Claude Code CLI version an operator pins in upstream.claude.header-defaults.user-agent
 // is a floor, not a lock (see plausibleClaudeCLIVersion). That makes an outdated pin
 // harmless for pass-through, but it also makes it invisible: nothing else in the
 // request path tells the operator that every client on a credential has moved past
@@ -74,7 +74,7 @@ type ClaudeClientVersionsReport struct {
 }
 
 // ClaudeClientVersionConfigKey names the setting an operator edits to move the pin.
-const ClaudeClientVersionConfigKey = "claude-header-defaults.user-agent"
+const ClaudeClientVersionConfigKey = "upstream.claude.header-defaults.user-agent"
 
 // ResetClaudeClientVersionRegistry clears every recorded observation. Tests only.
 func ResetClaudeClientVersionRegistry() {

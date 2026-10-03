@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	proxyconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 )
 
 func TestManagementClaudeClientVersionsReportsObservedDrift(t *testing.T) {
@@ -26,14 +26,14 @@ func TestManagementClaudeClientVersionsReportsObservedDrift(t *testing.T) {
 	server.cfg.ClaudeHeaderDefaults = cfg.ClaudeHeaderDefaults
 	server.mgmt.SetConfig(server.cfg)
 
-	unauthorized := httptest.NewRequest(http.MethodGet, "/v0/management/claude-client-versions", nil)
+	unauthorized := httptest.NewRequest(http.MethodGet, "/v8/management/server/claude-client-versions", nil)
 	unauthorizedRecorder := httptest.NewRecorder()
 	server.engine.ServeHTTP(unauthorizedRecorder, unauthorized)
 	if unauthorizedRecorder.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status = %d, want %d", unauthorizedRecorder.Code, http.StatusUnauthorized)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/v0/management/claude-client-versions", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v8/management/server/claude-client-versions", nil)
 	req.Header.Set("Authorization", "Bearer test-management-key")
 	recorder := httptest.NewRecorder()
 	server.engine.ServeHTTP(recorder, req)
