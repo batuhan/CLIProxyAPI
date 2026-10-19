@@ -10,8 +10,8 @@ RUN go mod download
 
 COPY . .
 
-ARG VERSION=dev
-ARG COMMIT=none
+ARG VERSION=8.0.35-local
+ARG COMMIT=af151294
 ARG BUILD_DATE=unknown
 
 RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" -o ./CLIProxyAPI ./cmd/server/
@@ -25,13 +25,15 @@ RUN mkdir /CLIProxyAPI
 COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
+COPY railway-entrypoint.sh /CLIProxyAPI/railway-entrypoint.sh
 
 WORKDIR /CLIProxyAPI
 
 EXPOSE 8317
 
-ENV TZ=Asia/Shanghai
+ENV TZ=Etc/UTC
 
 RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
 
-CMD ["./CLIProxyAPI"]
+ENTRYPOINT ["/bin/sh", "/CLIProxyAPI/railway-entrypoint.sh"]
+CMD ["/CLIProxyAPI/CLIProxyAPI"]
