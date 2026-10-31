@@ -944,9 +944,9 @@ func (h *Handler) tokenStoreWithBaseDir() coreauth.Store {
 		store = sdkAuth.GetTokenStore()
 		h.tokenStore = store
 	}
-	if h.cfg != nil {
+	if cfg := h.configSnapshot(); cfg != nil {
 		if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
-			dirSetter.SetBaseDir(h.cfg.AuthDir)
+			dirSetter.SetBaseDir(cfg.AuthDir)
 		}
 	}
 	return store
@@ -958,13 +958,13 @@ func (h *Handler) mergeExistingAuthFileMetadata(record *coreauth.Auth) {
 	}
 	var existingMap map[string]any
 
-	if h.cfg != nil && strings.TrimSpace(h.cfg.AuthDir) != "" {
+	if cfg := h.configSnapshot(); cfg != nil && strings.TrimSpace(cfg.AuthDir) != "" {
 		targetFile := record.FileName
 		if targetFile == "" {
 			targetFile = record.ID
 		}
 		if targetFile != "" {
-			fullPath := filepath.Join(h.cfg.AuthDir, targetFile)
+			fullPath := filepath.Join(cfg.AuthDir, targetFile)
 			if raw, errRead := os.ReadFile(fullPath); errRead == nil && len(raw) > 0 {
 				_ = json.Unmarshal(raw, &existingMap)
 			}
@@ -1030,7 +1030,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 		persistedRecord := record
 		if data, errRead := os.ReadFile(savedPath); errRead == nil && len(data) > 0 {
 			auths, errSynthesize := synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{
-				Config:           h.cfg,
+				Config:           h.configSnapshot(),
 				AuthDir:          filepath.Dir(savedPath),
 				Now:              time.Now(),
 				IDGenerator:      synthesizer.NewStableIDGenerator(),
@@ -1048,6 +1048,10 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 		}
 		if errHook := h.postAuthPersistHook(ctx, persistedRecord); errHook != nil {
 			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
+		}
+	} else if h.authManager != nil && strings.TrimSpace(savedPath) != "" {
+		if errReg := h.registerAuthFromFile(ctx, savedPath, nil); errReg != nil {
+			return savedPath, fmt.Errorf("register persisted auth failed: %w", errReg)
 		}
 	}
 	return savedPath, nil
