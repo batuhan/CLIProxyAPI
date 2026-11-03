@@ -946,6 +946,69 @@ func TestManager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan(t *testing.T) 
 	}
 }
 
+func TestManager_PickNextMixed_UltrafastEligibility(t *testing.T) {
+	for _, affinity := range []bool{false, true} {
+		name := "scheduler"
+		if affinity {
+			name = "session affinity"
+		}
+		t.Run(name, func(t *testing.T) {
+			var selector Selector = &RoundRobinSelector{}
+			if affinity {
+				selector = NewSessionAffinitySelector(selector)
+			}
+			manager := NewManager(nil, selector, nil)
+			manager.executors["codex"] = schedulerTestExecutor{}
+			model := "gpt-6.1-sol"
+			pro := &Auth{ID: "ultrafast-a-pro", Provider: "codex", Attributes: map[string]string{"plan_type": "pro"}}
+			max := &Auth{ID: "ultrafast-b-promax", Provider: "codex", Attributes: map[string]string{"plan_type": "promax"}}
+			registerSchedulerModels(t, "codex", model, pro.ID, max.ID)
+			for _, auth := range []*Auth{pro, max} {
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatal(err)
+				}
+			}
+			opts := cliproxyexecutor.Options{
+				Headers:  http.Header{"Session_id": []string{"ultrafast-transition"}},
+				Metadata: map[string]any{cliproxyexecutor.ServiceTierMetadataKey: "default"},
+			}
+			pick := func(want string) {
+				t.Helper()
+				got, _, _, err := manager.pickNextMixed(context.Background(), []string{"codex"}, model, opts, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got == nil || got.ID != want {
+					t.Fatalf("selected auth = %v, want %s", got, want)
+				}
+			}
+			pick(pro.ID)
+			opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey] = "ultrafast"
+			pick(max.ID)
+			// SDK callers can carry the tier in the original body without HTTP metadata.
+			delete(opts.Metadata, cliproxyexecutor.ServiceTierMetadataKey)
+			opts.OriginalRequest = []byte(`{"service_tier":"ultrafast"}`)
+			pick(max.ID)
+			max.Disabled = true
+			if _, err := manager.Update(context.Background(), max); err != nil {
+				t.Fatal(err)
+			}
+			got, _, _, err := manager.pickNextMixed(context.Background(), []string{"codex"}, model, opts, nil)
+			if err == nil || got != nil {
+				t.Fatalf("no eligible account: auth=%v error=%v", got, err)
+			}
+			// OpenAI API credentials are eligible without a ChatGPT plan.
+			pro.Attributes = map[string]string{AttributeAPIKey: "disposable-test-key"}
+			if _, err := manager.Update(context.Background(), pro); err != nil {
+				t.Fatal(err)
+			}
+			pick(pro.ID)
+			opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey] = "default"
+			pick(pro.ID)
+		})
+	}
+}
+
 func TestManagerPluginSchedulerSelectsAuthID(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.executors["gemini"] = schedulerTestExecutor{}

@@ -84,9 +84,10 @@ type requiredAuthKindContextKey struct{}
 type credentialPolicyContextKey struct{}
 
 type authSelectionEligibility struct {
-	requiredKind     string
-	credentialPolicy string
-	disallowFreeAuth bool
+	requiredKind          string
+	credentialPolicy      string
+	disallowFreeAuth      bool
+	requireCodexUltrafast bool
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -106,7 +107,10 @@ func credentialPolicyFromContext(ctx context.Context) string {
 }
 
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
-	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata)}
+	eligibility := authSelectionEligibility{
+		disallowFreeAuth:      disallowFreeAuthFromMetadata(opts.Metadata),
+		requireCodexUltrafast: strings.EqualFold(serviceTierFromOptions(opts), "ultrafast"),
+	}
 	if ctx != nil {
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
@@ -123,6 +127,15 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 	}
 	if e.credentialPolicy != "" && !credentialPolicyAllows(e.credentialPolicy, auth) {
 		return false
+	}
+	if e.requireCodexUltrafast && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") && auth.AuthKind() != AuthKindAPIKey {
+		// Only Pro Max is known to include Ultrafast for self-serve OAuth.
+		// API-key access has independent eligibility and must not be plan-filtered.
+		switch strings.ToLower(strings.TrimSpace(auth.Attributes["plan_type"])) {
+		case "promax", "pro-max", "pro_max":
+		default:
+			return false
+		}
 	}
 	return !e.disallowFreeAuth || !isFreeCodexAuth(auth)
 }

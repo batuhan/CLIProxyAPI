@@ -9,8 +9,6 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -755,7 +753,7 @@ func TestConvertClaudeRequestToCodex_OmitsClaudeCAISForGrokTarget(t *testing.T) 
 				t.Fatalf("IsValidClaudeCAISSignature() = %t, want %t", got, tc.wantAllowlistedCAIS)
 			}
 			payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
-			payload, _ = sjson.SetBytes(payload, "messages.0.content.0.signature", signature)
+			payload, _ = ojson.SetBytes(payload, "messages.0.content.0.signature", signature)
 
 			out, err := ConvertClaudeRequestToCodex("grok-4.5", payload, false)
 			if err != nil {
@@ -764,7 +762,7 @@ func TestConvertClaudeRequestToCodex_OmitsClaudeCAISForGrokTarget(t *testing.T) 
 			if got := countRequestInputItemsByType(out, "reasoning"); got != 0 {
 				t.Fatalf("got %d reasoning items, want Claude CAIS omitted; output=%s", got, out)
 			}
-			if got := gjson.GetBytes(out, "input.0.content.0.text").String(); got != "answer" {
+			if got := ojson.GetBytes(out, "input.0.content.0.text").String(); got != "answer" {
 				t.Fatalf("assistant output text = %q, want unchanged answer; output=%s", got, out)
 			}
 		})

@@ -1983,3 +1983,36 @@ func TestCodexClientModelsResponse_DoesNotAdvertiseImageDetailOriginalForClaudeO
 		}
 	}
 }
+
+func TestCodexClientModelsResponse_Ultrafast(t *testing.T) {
+	for _, tc := range []struct {
+		model, provider string
+		want            bool
+	}{
+		{"gpt-6.1-sol", "codex", true},
+		{"gpt-6-astra", "codex", true},
+		{"gpt-6-sol", "codex", false},
+		{"gpt-6.1-sol", "openai-compatibility", false},
+	} {
+		t.Run(tc.model+"/"+tc.provider, func(t *testing.T) {
+			response := BuildResponse([]map[string]any{{"id": tc.model}}, func(string) []string { return []string{tc.provider} }, false)
+			entries := response["models"].([]map[string]any)
+			if len(entries) != 1 {
+				t.Fatalf("models = %v", entries)
+			}
+			found := 0
+			for _, raw := range entries[0]["service_tiers"].([]any) {
+				if tier := raw.(map[string]any); tier["id"] == "ultrafast" {
+					found++
+				}
+			}
+			want := 0
+			if tc.want {
+				want = 1
+			}
+			if found != want {
+				t.Fatalf("Ultrafast entries = %d, want %d", found, want)
+			}
+		})
+	}
+}

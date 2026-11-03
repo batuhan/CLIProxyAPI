@@ -24,7 +24,7 @@ const AuthSelectionModelMetadataKey = "auth_selection_model"
 // ReasoningEffortMetadataKey stores the client-requested reasoning effort for usage logs.
 const ReasoningEffortMetadataKey = "reasoning_effort"
 
-// ServiceTierMetadataKey stores the client-requested service tier for usage logs.
+// ServiceTierMetadataKey stores the client-requested service tier for credential eligibility and usage logs.
 const ServiceTierMetadataKey = "service_tier"
 
 // GenerateMetadataKey stores whether the client requested actual generation for usage logs.

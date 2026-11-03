@@ -563,6 +563,21 @@ func applyCodexClientProviderCapabilities(entry map[string]any, id string, provi
 		entry["prefer_websockets"] = false
 		entry["service_tiers"] = []any{}
 		nullCodexClientRequiredOptions(entry)
+		return
+	}
+	switch codexClientMetadataModelID(id) {
+	case "gpt-6.1-sol", "gpt-6-astra":
+		tiers, _ := entry["service_tiers"].([]any)
+		for _, raw := range tiers {
+			if tier, ok := raw.(map[string]any); ok && tier["id"] == "ultrafast" {
+				return
+			}
+		}
+		entry["service_tiers"] = append(tiers, map[string]any{
+			"id":          "ultrafast",
+			"name":        "Ultrafast",
+			"description": "Requires Pro $500 or eligible API access; uses included quota at 8x the Standard rate",
+		})
 	}
 }
 

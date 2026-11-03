@@ -1715,7 +1715,10 @@ func reasoningEffortFromOptions(opts cliproxyexecutor.Options) string {
 }
 
 func serviceTierFromOptions(opts cliproxyexecutor.Options) string {
-	return stringMetadataValue(opts.Metadata, cliproxyexecutor.ServiceTierMetadataKey)
+	if tier := stringMetadataValue(opts.Metadata, cliproxyexecutor.ServiceTierMetadataKey); tier != "" {
+		return tier
+	}
+	return strings.TrimSpace(util.GetGJSONBytesNoCopy(opts.OriginalRequest, "service_tier").String())
 }
 
 func generateFromOptions(opts cliproxyexecutor.Options) (bool, bool) {
