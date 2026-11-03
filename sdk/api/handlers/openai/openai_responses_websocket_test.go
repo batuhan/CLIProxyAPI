@@ -8049,3 +8049,73 @@ func TestForwardResponsesWebsocketPrefersBufferedErrorOverClosedData(t *testing.
 		}
 	}
 }
+
+func TestResponsesWebsocketPinnedAuthTierChange(t *testing.T) {
+	for _, continuation := range []bool{false, true} {
+		name := "full request reselects"
+		if continuation {
+			name = "continuation refuses without replay"
+		}
+		t.Run(name, func(t *testing.T) {
+			executor := &websocketDirectCaptureExecutor{provider: "codex"}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			model := "codex-pinned-tier-change"
+			for _, plan := range []string{"pro", "promax"} {
+				id := "tier-" + plan
+				a := &coreauth.Auth{ID: id, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"plan_type": plan, "websockets": "true"}}
+				if _, err := manager.Register(context.Background(), a); err != nil {
+					t.Fatal(err)
+				}
+				registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+			}
+			h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+			router := gin.New()
+			router.GET("/v1/responses", h.ResponsesWebsocket)
+			server := httptest.NewServer(router)
+			defer server.Close()
+			conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			send := func(extra string) {
+				t.Helper()
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.create","model":%q,"input":[]%s}`, model, extra))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			completed := func() {
+				t.Helper()
+				_, p, err := conn.ReadMessage()
+				if err != nil || ojson.GetBytesNoCopy(p, "type").String() != wsEventTypeCompleted {
+					t.Fatalf("response=%s error=%v", p, err)
+				}
+			}
+			send(`,"service_tier":"default"`)
+			completed()
+			extra := `,"service_tier":"ultrafast"`
+			if continuation {
+				extra += `,"previous_response_id":"resp-1"`
+			}
+			send(extra)
+			if continuation {
+				_, p, err := conn.ReadMessage()
+				if err == nil && ojson.GetBytesNoCopy(p, "type").String() != "error" {
+					t.Fatalf("continuation was not refused: %s", p)
+				}
+				if got := executor.AuthIDs(); len(got) != 1 || got[0] != "tier-pro" {
+					t.Fatalf("replayed continuation: %v", got)
+				}
+				return
+			}
+			completed()
+			send(`,"service_tier":"priority"`)
+			completed()
+			if got := executor.AuthIDs(); len(got) != 3 || got[0] != "tier-pro" || got[1] != "tier-promax" || got[2] != "tier-promax" {
+				t.Fatalf("selected accounts = %v", got)
+			}
+		})
+	}
+}

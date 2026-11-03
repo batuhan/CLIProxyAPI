@@ -884,3 +884,45 @@ func TestResponsesWebsocketEarly429RetriesAnotherCredentialWithoutClosingDownstr
 		}
 	}
 }
+
+func TestResponsesWebsocketDuplexRejectsIneligibleUltrafastWithoutReplay(t *testing.T) {
+	f := newLossFixture(t, true, func(index int, c *websocket.Conn, read func() []byte) {
+		for {
+			p := read()
+			if p == nil {
+				return
+			}
+			if ojson.GetBytesNoCopy(p, "service_tier").String() == "ultrafast" {
+				t.Error("ineligible Ultrafast reached upstream")
+			}
+			_ = c.WriteMessage(websocket.TextMessage, []byte(lossCreated))
+			_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r1","output":[]}}`))
+		}
+	})
+	for _, a := range f.base.AuthManager.List() {
+		if a.Attributes["api_key"] == "key-a" {
+			delete(a.Attributes, "api_key")
+			a.Attributes["plan_type"] = "pro"
+			a.Attributes[coreauth.AttributeAuthKind] = coreauth.AuthKindOAuth
+			a.Metadata["access_token"] = "key-a"
+			if _, err := f.base.AuthManager.Update(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	f.create(`,"service_tier":"default"`)
+	f.awaitCompleted()
+	f.create(`,"service_tier":"ultrafast","event_id":"refused"`)
+	p := f.nextError()
+	if !strings.Contains(ojson.GetBytesNoCopy(p, "error.message").String(), "service tier") {
+		t.Fatalf("refusal = %s", p)
+	}
+	f.create(`,"service_tier":"priority"`)
+	f.awaitCompleted()
+	if f.connections.Load() != 1 || f.creates.Load() != 2 {
+		t.Fatalf("connections=%d creates=%d; want one connection and two eligible creates", f.connections.Load(), f.creates.Load())
+	}
+	if got, _ := f.authIDs.Load(1); got != "Bearer key-a" {
+		t.Fatalf("selected account = %v, want ordinary Pro", got)
+	}
+}

@@ -422,6 +422,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
+	predicate = preferReadyCodexProPredicate([]*modelScheduler{shard}, predicate, opts)
 	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
 		return picked, nil
 	}
@@ -501,6 +502,9 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 		shard := providerState.ensureModelLocked(modelKey, now)
 		candidateShards[providerIndex] = shard
+	}
+	predicate = preferReadyCodexProPredicate(candidateShards, predicate, opts)
+	for _, shard := range candidateShards {
 		if shard == nil {
 			continue
 		}
@@ -621,6 +625,32 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+}
+
+// Narrow only after readiness and request constraints are known, before any
+// rotation state advances. A pinned continuation remains on its eligible auth.
+func preferReadyCodexProPredicate(shards []*modelScheduler, predicate func(*scheduledAuth) bool, opts cliproxyexecutor.Options) func(*scheduledAuth) bool {
+	if !prefersCodexPro(opts) {
+		return predicate
+	}
+	for _, shard := range shards {
+		if shard == nil {
+			continue
+		}
+		for _, bucket := range shard.readyByPriority {
+			if bucket == nil {
+				continue
+			}
+			for _, entry := range bucket.all.flat {
+				if predicate(entry) && isOrdinaryCodexPro(entry.auth) {
+					return func(candidate *scheduledAuth) bool {
+						return predicate(candidate) && (!strings.EqualFold(strings.TrimSpace(candidate.auth.Provider), "codex") || isOrdinaryCodexPro(candidate.auth))
+					}
+				}
+			}
+		}
+	}
+	return predicate
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.

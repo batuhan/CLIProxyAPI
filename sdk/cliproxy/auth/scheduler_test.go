@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -947,15 +948,16 @@ func TestManager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan(t *testing.T) 
 }
 
 func TestManager_PickNextMixed_UltrafastEligibility(t *testing.T) {
-	for _, affinity := range []bool{false, true} {
-		name := "scheduler"
-		if affinity {
-			name = "session affinity"
-		}
+	for _, name := range []string{"scheduler", "legacy", "session affinity"} {
 		t.Run(name, func(t *testing.T) {
 			var selector Selector = &RoundRobinSelector{}
-			if affinity {
-				selector = NewSessionAffinitySelector(selector)
+			if name == "legacy" {
+				selector = &trackingSelector{}
+			}
+			if name == "session affinity" {
+				affinity := NewSessionAffinitySelector(selector)
+				t.Cleanup(affinity.Stop)
+				selector = affinity
 			}
 			manager := NewManager(nil, selector, nil)
 			manager.executors["codex"] = schedulerTestExecutor{}
@@ -985,6 +987,18 @@ func TestManager_PickNextMixed_UltrafastEligibility(t *testing.T) {
 			pick(pro.ID)
 			opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey] = "ultrafast"
 			pick(max.ID)
+			for _, plan := range []string{"pro-max", "pro_max"} {
+				max.Attributes["plan_type"] = plan
+				if _, err := manager.Update(context.Background(), max); err != nil {
+					t.Fatal(err)
+				}
+				pick(max.ID)
+			}
+			opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = pro.ID
+			if got, _, _, err := manager.pickNextMixed(context.Background(), []string{"codex"}, model, opts, nil); got != nil || err == nil {
+				t.Fatalf("ineligible pinned auth = %v, error = %v", got, err)
+			}
+			delete(opts.Metadata, cliproxyexecutor.PinnedAuthMetadataKey)
 			// SDK callers can carry the tier in the original body without HTTP metadata.
 			delete(opts.Metadata, cliproxyexecutor.ServiceTierMetadataKey)
 			opts.OriginalRequest = []byte(`{"service_tier":"ultrafast"}`)
@@ -996,6 +1010,13 @@ func TestManager_PickNextMixed_UltrafastEligibility(t *testing.T) {
 			got, _, _, err := manager.pickNextMixed(context.Background(), []string{"codex"}, model, opts, nil)
 			if err == nil || got != nil {
 				t.Fatalf("no eligible account: auth=%v error=%v", got, err)
+			}
+			pro.Attributes["plan_type"] = "unknown"
+			if _, err := manager.Update(context.Background(), pro); err != nil {
+				t.Fatal(err)
+			}
+			if got, _, _, err := manager.pickNextMixed(context.Background(), []string{"codex"}, model, opts, nil); got != nil || err == nil {
+				t.Fatalf("unknown OAuth plan = %v, error = %v", got, err)
 			}
 			// OpenAI API credentials are eligible without a ChatGPT plan.
 			pro.Attributes = map[string]string{AttributeAPIKey: "disposable-test-key"}
@@ -3195,4 +3216,126 @@ func (e *callbackSchedulerTestExecutor) Refresh(ctx context.Context, auth *Auth)
 		return e.refresh(ctx, auth)
 	}
 	return auth, nil
+}
+
+func TestManager_CodexProPreferenceAndFallback(t *testing.T) {
+	for _, mode := range []string{"scheduler", "legacy", "affinity"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			var selector Selector = &RoundRobinSelector{}
+			if mode == "legacy" {
+				selector = &trackingSelector{}
+			}
+			if mode == "affinity" {
+				affinity := NewSessionAffinitySelector(selector)
+				t.Cleanup(affinity.Stop)
+				selector = affinity
+			}
+			manager := NewManager(nil, selector, nil)
+			manager.executors["codex"] = schedulerTestExecutor{}
+			model := "codex-plan-preference-" + mode
+			max := &Auth{ID: "a-max-" + mode, Provider: "codex", Attributes: map[string]string{"plan_type": "promax", "priority": "10"}}
+			pro := &Auth{ID: "b-pro-" + mode, Provider: "codex", Attributes: map[string]string{"plan_type": "pro"}}
+			unknown := &Auth{ID: "c-unknown-" + mode, Provider: "codex"}
+			key := &Auth{ID: "d-key-" + mode, Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "test-key"}}
+			registerSchedulerModels(t, "codex", model, max.ID, pro.ID, unknown.ID, key.ID)
+			update := func(a *Auth) {
+				t.Helper()
+				if _, err := manager.Update(ctx, a); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, a := range []*Auth{max, pro, unknown, key} {
+				if _, err := manager.Register(ctx, a); err != nil {
+					t.Fatal(err)
+				}
+			}
+			opts := cliproxyexecutor.Options{Metadata: map[string]any{}, Headers: http.Header{"Session_id": []string{"plan-preference"}}}
+			pick := func(want string, tried map[string]struct{}) {
+				t.Helper()
+				got, _, _, err := manager.pickNextMixed(ctx, []string{"codex"}, model, opts, tried)
+				if err != nil || got == nil || got.ID != want {
+					t.Fatalf("pick = %v, %v; want %s", got, err, want)
+				}
+			}
+			for _, tier := range []string{"auto", "default", "priority"} {
+				opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey] = tier
+				pick(pro.ID, nil)
+			}
+			// Explicit eligible pins preserve connection-scoped continuity.
+			opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = max.ID
+			pick(max.ID, nil)
+			delete(opts.Metadata, cliproxyexecutor.PinnedAuthMetadataKey)
+			for _, state := range []string{"disabled", "cooldown", "quota", "unavailable"} {
+				pro.Disabled = state == "disabled"
+				pro.ModelStates = map[string]*ModelState{model: {Unavailable: true, NextRetryAfter: time.Now().Add(time.Hour)}}
+				if state == "quota" {
+					pro.ModelStates[model].Quota = QuotaState{Exceeded: true, NextRecoverAt: time.Now().Add(time.Hour)}
+				}
+				if state == "unavailable" {
+					pro.ModelStates[model].NextRetryAfter = time.Time{}
+				}
+				update(pro)
+				opts.Headers.Set("Session_id", "fallback-"+state)
+				pick(max.ID, nil)
+			}
+			pro.Disabled = false
+			pro.ModelStates = map[string]*ModelState{model: {}}
+			update(pro)
+			opts.Headers.Set("Session_id", "fresh-pro-session")
+			pick(pro.ID, nil)
+			pick(max.ID, map[string]struct{}{pro.ID: {}})
+			if mode == "affinity" {
+				// Compatible bindings survive Pro recovery and tier changes.
+				opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey] = "ultrafast"
+				pick(max.ID, nil)
+				opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey] = "default"
+				pick(max.ID, nil)
+				opts.Headers.Set("Session_id", "another-fresh-session")
+				pick(pro.ID, nil)
+			}
+			// Unknown OAuth plans and API keys are Standard/Fast fallback, never preferred Pro.
+			pro.Disabled = true
+			max.Disabled = true
+			key.Disabled = true
+			update(pro)
+			update(max)
+			update(key)
+			pick(unknown.ID, nil)
+			unknown.Disabled = true
+			key.Disabled = false
+			update(unknown)
+			update(key)
+			pick(key.ID, nil)
+		})
+	}
+}
+
+func TestManager_CodexProRoundRobin(t *testing.T) {
+	ctx := context.Background()
+	affinity := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer affinity.Stop()
+	manager := NewManager(nil, affinity, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	model := "codex-pro-rotation"
+	for _, a := range []*Auth{
+		{ID: "rotation-a", Provider: "codex", Attributes: map[string]string{"plan_type": "pro"}},
+		{ID: "rotation-b", Provider: "codex", Attributes: map[string]string{"plan_type": "pro"}},
+		{ID: "rotation-max", Provider: "codex", Attributes: map[string]string{"plan_type": "promax"}},
+	} {
+		registerSchedulerModels(t, "codex", model, a.ID)
+		if _, err := manager.Register(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, selector := range []Selector{&RoundRobinSelector{}, affinity} {
+		manager.SetSelector(selector)
+		for i, want := range []string{"rotation-a", "rotation-b", "rotation-a", "rotation-b"} {
+			opts := cliproxyexecutor.Options{Headers: http.Header{"Session_id": []string{fmt.Sprintf("fresh-%d", i)}}}
+			got, _, err := manager.pickNext(ctx, "codex", model, opts, nil)
+			if err != nil || got == nil || got.ID != want {
+				t.Fatalf("rotation pick %d = %v, %v; want %s", i, got, err, want)
+			}
+		}
+	}
 }

@@ -602,6 +602,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		)
 		pluginExecutorID := handlers.PreparedStreamPluginExecutor(executionParent)
 		isPluginExecutorRoute := pluginExecutorID != ""
+		requestServiceTier := ojson.GetBytesNoCopy(payload, "service_tier").String()
 		if pinnedAuthID != "" {
 			pinnedAuth, homeRuntime, ok := sessionAuthByIDWithSource(pinnedAuthID)
 			providerKey := ""
@@ -609,7 +610,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				providerKey = strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
 			}
 			state, hasState := pinnedAuthByProvider[providerKey]
-			if !ok || !hasState || state.authID != pinnedAuthID || !responsesWebsocketPinnedAuthMatchesModel(pinnedAuth, requestModelName, state.modelKey, homeRuntime) {
+			if !ok || !hasState || state.authID != pinnedAuthID || !pinnedAuth.SupportsServiceTier(requestServiceTier) || !responsesWebsocketPinnedAuthMatchesModel(pinnedAuth, requestModelName, state.modelKey, homeRuntime) {
 				pinnedAuthID = ""
 			}
 		}
@@ -619,7 +620,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				for providerKey := range providerSet {
 					state, ok := pinnedAuthByProvider[providerKey]
 					candidateAuth, homeRuntime, okAuth := sessionAuthByIDWithSource(state.authID)
-					if ok && okAuth && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, requestModelName, state.modelKey, homeRuntime) {
+					if ok && okAuth && candidateAuth.SupportsServiceTier(requestServiceTier) && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, requestModelName, state.modelKey, homeRuntime) {
 						pinnedAuthID = state.authID
 					} else {
 						delete(pinnedAuthByProvider, providerKey)
@@ -852,6 +853,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 					errAuth = &interfaces.ErrorMessage{
 						StatusCode: http.StatusUnauthorized,
 						Error:      errors.New("client credential changed during the websocket stream; reconnect"),
+					}
+				}
+				if errAuth == nil {
+					current, _ := sessionAuthByID(lastAttemptedAuthID)
+					if !current.SupportsServiceTier(ojson.GetBytesNoCopy(turnPayload, "service_tier").String()) {
+						errAuth = &interfaces.ErrorMessage{
+							StatusCode: http.StatusBadRequest,
+							Error:      errors.New("requested service tier is unavailable on this connection; reconnect with a full request"),
+						}
 					}
 				}
 				if errAuth == nil {

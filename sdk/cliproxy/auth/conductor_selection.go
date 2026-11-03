@@ -128,16 +128,66 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 	if e.credentialPolicy != "" && !credentialPolicyAllows(e.credentialPolicy, auth) {
 		return false
 	}
-	if e.requireCodexUltrafast && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") && auth.AuthKind() != AuthKindAPIKey {
-		// Only Pro Max is known to include Ultrafast for self-serve OAuth.
-		// API-key access has independent eligibility and must not be plan-filtered.
-		switch strings.ToLower(strings.TrimSpace(auth.Attributes["plan_type"])) {
-		case "promax", "pro-max", "pro_max":
-		default:
-			return false
-		}
+	if e.requireCodexUltrafast && !auth.SupportsServiceTier("ultrafast") {
+		return false
 	}
 	return !e.disallowFreeAuth || !isFreeCodexAuth(auth)
+}
+
+// SupportsServiceTier checks credential eligibility, not the tier upstream will serve.
+// API keys have independent upstream entitlements; unknown OAuth plans fail closed
+// for Ultrafast but remain usable as fallback for other tiers.
+func (a *Auth) SupportsServiceTier(tier string) bool {
+	if a == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(tier), "ultrafast") || !strings.EqualFold(strings.TrimSpace(a.Provider), "codex") || a.AuthKind() == AuthKindAPIKey {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(a.Attributes["plan_type"])) {
+	case "promax", "pro-max", "pro_max":
+		return true
+	default:
+		return false
+	}
+}
+
+func prefersCodexPro(opts cliproxyexecutor.Options) bool {
+	switch strings.ToLower(serviceTierFromOptions(opts)) {
+	case "", "auto", "default", "priority":
+		return true
+	default:
+		return false
+	}
+}
+
+func isOrdinaryCodexPro(a *Auth) bool {
+	return a != nil && strings.EqualFold(strings.TrimSpace(a.Provider), "codex") && a.AuthKind() != AuthKindAPIKey && strings.EqualFold(strings.TrimSpace(a.Attributes["plan_type"]), "pro")
+}
+
+// preferCodexProAuths receives ready candidates only. Keep other providers in the
+// rotation, and retain all Codex fallback credentials if no ordinary Pro is ready.
+func preferCodexProAuths(auths []*Auth, opts cliproxyexecutor.Options) []*Auth {
+	if !prefersCodexPro(opts) {
+		return auths
+	}
+	hasPro := false
+	for _, a := range auths {
+		if isOrdinaryCodexPro(a) {
+			hasPro = true
+			break
+		}
+	}
+	if !hasPro {
+		return auths
+	}
+	preferred := make([]*Auth, 0, len(auths))
+	for _, a := range auths {
+		if !strings.EqualFold(strings.TrimSpace(a.Provider), "codex") || isOrdinaryCodexPro(a) {
+			preferred = append(preferred, a)
+		}
+	}
+	return preferred
 }
 
 func (m *Manager) syncSchedulerFromSnapshot(auths []*Auth) {
@@ -641,10 +691,10 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // the plugin scheduler, plus the candidates handed to the configured selector. Both are equal
 // unless session affinity or an across-priorities scheduler is active, in which case the selector
 // or scheduler additionally receives lower priority tiers.
-func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross bool) (priorityAuths, selectorAuths []*Auth, err error) {
+func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross bool, opts cliproxyexecutor.Options) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
 
-	if !sessionAffinity && !schedulerAcross {
+	if !sessionAffinity && !schedulerAcross && !prefersCodexPro(opts) {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
 		if err != nil {
 			return nil, nil, err
@@ -660,17 +710,26 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 		return nil, nil, errAcross
 	}
 	allAuths = cloneAuthSlice(allAuths)
+	preferredAuths := allAuths
+	fallback := selector
+	if affinity, ok := selector.(*SessionAffinitySelector); ok {
+		fallback = affinity.fallback
+	}
+	if _, weighted := fallback.(*WeightedRoundRobinSelector); weighted {
+		preferredAuths = positiveWeightAuths(preferredAuths)
+	}
+	preferredAuths = preferCodexProAuths(preferredAuths, opts)
 
 	if schedulerAcross {
-		priorityAuths = allAuths
+		priorityAuths = preferredAuths
 	} else {
-		priorityAuths = highestPriorityAuths(allAuths)
+		priorityAuths = highestPriorityAuths(preferredAuths)
 	}
 
 	if sessionAffinity {
 		selectorAuths = allAuths
 	} else {
-		selectorAuths = highestPriorityAuths(allAuths)
+		selectorAuths = highestPriorityAuths(preferredAuths)
 	}
 	return priorityAuths, selectorAuths, nil
 }
@@ -1973,7 +2032,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	now := time.Now()
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, now, schedulerAcross)
+	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, now, schedulerAcross, opts)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
@@ -2322,7 +2381,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	now := time.Now()
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, now, schedulerAcross)
+	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, now, schedulerAcross, opts)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)
