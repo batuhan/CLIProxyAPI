@@ -27,4 +27,5 @@ git push origin patched
 Merge the release instead of rebasing onto it. The Claude signature patches
 conflict when replayed commit by commit on newer releases.
 
-`TestResponsesInterruptStopsHTTPUpstream` also fails intermittently on unpatched upstream.
+`TestResponsesInterruptStopsHTTPUpstream` and `TestServerResponsesWebsocketReauthorizesEachTurn` also fail
+intermittently on unpatched upstream (the latter in about 30% of runs on v8.0.64, a TempDir cleanup race).
